@@ -1,4 +1,4 @@
-# Define parameters at the script level instead of using param() block
+# Define parameters at the script level
 $Hostname = $args[0]
 
 # If no hostname provided via argument, prompt for input
@@ -6,32 +6,30 @@ if (-not $Hostname) {
     $Hostname = Read-Host "Please enter the hostname"
 }
 
-# Function to find PSExec in common locations
-function Find-PSExec {
-    $possibleLocations = @(
-        $PSScriptRoot,  # Current script directory
-        (Get-Location).Path,  # Current working directory
-        "C:\Tools\Sysinternals",
-        "C:\Program Files\Sysinternals",
-        "C:\Program Files (x86)\Sysinternals",
-        "$env:USERPROFILE\Downloads\Sysinternals"
-    )
+# Ensure C:\Tools directory exists
+if (-Not (Test-Path -Path "C:\Tools")) {
+    New-Item -ItemType Directory -Path "C:\Tools" | Out-Null
+}
 
-    foreach ($location in $possibleLocations) {
-        # Try both PsExec.exe and PsExec64.exe
-        $psexecPaths = @(
-            (Join-Path $location "PsExec.exe"),
-            (Join-Path $location "PsExec64.exe")
-        )
+# Download PSExec if not exists
+$psexecZipPath = "C:\Tools\PSTools.zip"
+$psexecExePath = "C:\Tools\PsExec.exe"
 
-        foreach ($psexecPath in $psexecPaths) {
-            if (Test-Path $psexecPath) {
-                return $psexecPath
-            }
-        }
+if (-Not (Test-Path $psexecExePath)) {
+    try {
+        Write-Output "Downloading PSExec..."
+        Invoke-WebRequest -Uri "https://download.sysinternals.com/files/PSTools.zip" -OutFile $psexecZipPath
+
+        # Extract PSExec
+        Expand-Archive -Path $psexecZipPath -DestinationPath "C:\Tools" -Force
+
+        # Clean up zip file
+        Remove-Item $psexecZipPath -Force
     }
-
-    return $null
+    catch {
+        Write-Error "Failed to download PSExec: $_"
+        exit 1
+    }
 }
 
 # Load environment variables
@@ -62,42 +60,10 @@ if (-not $env:DOWNLOAD_URL -or -not $env:KEY_SECRET) {
     exit 1
 }
 
-# Ensure C:\Tools directory exists
-if (-Not (Test-Path -Path "C:\Tools")) {
-    New-Item -ItemType Directory -Path "C:\Tools" | Out-Null
-}
-
-# Function to get a standardized filename
-function Get-StandardizedFileName {
-    param([string]$OriginalFileName)
-    
-    # Remove any characters that might cause issues
-    $sanitizedName = $OriginalFileName -replace '[^a-zA-Z0-9\.]',''
-    
-    # If the name is too long, truncate it
-    if ($sanitizedName.Length -gt 50) {
-        $sanitizedName = $sanitizedName.Substring(0, 50)
-    }
-    
-    # Ensure it ends with .msi if it doesn't already
-    if (-not $sanitizedName.ToLower().EndsWith('.msi')) {
-        $sanitizedName += '.msi'
-    }
-    
-    return $sanitizedName
-}
-
-# Find PSExec
-$psexecPath = Find-PSExec
-
 # Attempt to connect to hostname using PSExec
 try {
-    if (-not $psexecPath) {
-        throw "PSExec not found. Please ensure PsExec.exe or PsExec64.exe is in the script directory or system PATH."
-    }
-
-    # Use full path to psexec
-    $psexecCommand = "&`"$psexecPath`" \\$Hostname cmd /c `"echo Connection successful`""
+    Set-Location "C:\Tools"
+    $psexecCommand = ".\PsExec.exe \\$Hostname cmd /c `"echo Connection successful`""
     
     # Capture and display output
     $result = Invoke-Expression $psexecCommand 2>&1
@@ -114,38 +80,48 @@ catch {
     exit 1
 }
 
-# Download the file
+# Remote uninstallation and installation
 try {
-    $response = Invoke-WebRequest -Uri $env:DOWNLOAD_URL -UseBasicParsing
-    
-    # Get the filename from the response headers or URL
-    $originalFileName = $response.Headers.'Content-Disposition' -replace '.*filename=', '' -replace '"',''
-    if (-not $originalFileName) {
-        $originalFileName = [System.IO.Path]::GetFileName($env:DOWNLOAD_URL)
-    }
-    
-    # Standardize the filename
-    $standardFileName = Get-StandardizedFileName -OriginalFileName $originalFileName
-    
-    # Save the file
-    $filePath = Join-Path "C:\Tools" $standardFileName
-    [System.IO.File]::WriteAllBytes($filePath, $response.Content)
-    
-    Write-Output "File downloaded to $filePath"
-}
-catch {
-    Write-Error "Failed to download file: $_"
-    exit 1
-}
+    # Prepare remote commands
+    $remoteCommands = @(
+        "powershell -Command `"Start-Process powershell -Verb RunAs -ArgumentList '-Command', 'Get-WmiObject Win32_Product | Where-Object { `$_.Name -like ''BeyondTrust Jump Client*'' } | ForEach-Object { Start-Process ''msiexec.exe'' -ArgumentList ''/x '', `$_.IdentifyingNumber, ''/qn /norestart'' -Wait }'`"",
+        "if not exist C:\Tools mkdir C:\Tools",
+        "powershell -Command `"Start-Process powershell -Verb RunAs -ArgumentList '-Command', 'Invoke-WebRequest -Uri ''$env:DOWNLOAD_URL'' -OutFile ''C:\Tools\install.msi'''`"",
+        "msiexec /i C:\Tools\install.msi KEY_INFO=`"$env:KEY_SECRET`" /qn /norestart /l*v C:\Tools\install.log"
+    )
 
-# Install the MSI
-try {
-    $installArgs = "/i `"$filePath`" KEY_INFO=`"$env:KEY_SECRET`" /qn /norestart"
-    Start-Process msiexec.exe -ArgumentList $installArgs -Wait -PassThru
-    
-    Write-Output "Installation completed successfully"
+    Set-Location "C:\Tools"  # Ensure we are in the directory where PsExec is located
+
+    foreach ($command in $remoteCommands) {
+        if ($command.Trim() -ne "") {
+            Write-Output "Executing command: $command"
+            $process = Start-Process -FilePath ".\PsExec.exe" -ArgumentList "\\$Hostname", "cmd", "/c", "`"$command`"" -Wait -PassThru -RedirectStandardOutput "C:\Tools\psexec_output.txt" -RedirectStandardError "C:\Tools\psexec_error.txt"
+            if ($process.ExitCode -ne 0) {
+                $errorContent = Get-Content "C:\Tools\psexec_error.txt"
+                $installLog = Get-Content "C:\Tools\install.log" -ErrorAction SilentlyContinue
+                throw "Remote command failed with exit code $($process.ExitCode). Error details:`n$errorContent`nInstallation log:`n$installLog"
+            }
+        }
+    }
+
+    Write-Output "Remote uninstallation and installation completed successfully"
 }
 catch {
-    Write-Error "Installation failed: $_"
+    Write-Error "Failed to uninstall/install on remote host: $_"
     exit 1
+}
+finally {
+    # Cleanup: Remove local PSExec files
+    try {
+        # Remove PSExec executables
+        Remove-Item "C:\Tools\PsExec.exe" -Force
+        Remove-Item "C:\Tools\PsExec64.exe" -ErrorAction SilentlyContinue
+        Remove-Item "C:\Tools\psexec_output.txt" -ErrorAction SilentlyContinue
+        Remove-Item "C:\Tools\psexec_error.txt" -ErrorAction SilentlyContinue
+        
+        Write-Output "Cleaned up local PSExec files"
+    }
+    catch {
+        Write-Error "Failed to clean up local PSExec files: $_"
+    }
 }
