@@ -4,6 +4,9 @@
 
 This PowerShell script automates the process of connecting to a remote host, downloading and installing the BeyondTrust Jump Client, and performing cleanup tasks. 🛠️
 
+## Disclaimer 🤖 
+AI-Assisted Development This script was created with significant assistance from AI technologies. As the creator is not a professional PowerShell or software developer, the code reflects a collaborative approach between human intent and AI-generated solution.
+
 ## Features ✨
 
 - Prompts for hostname input if not provided as an argument
