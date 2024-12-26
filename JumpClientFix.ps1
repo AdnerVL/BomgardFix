@@ -14,51 +14,64 @@ if (-Not (Test-Path -Path "C:\Tools\Script")) {
 # Download PSExec if not exists
 $psexecZipPath = "C:\Tools\Script\PSTools.zip"
 $psexecExePath = "C:\Tools\Script\PsExec.exe"
-$psexec64ExePath = "C:\Tools\Script\PsExec64.exe"
 
-if (-Not (Test-Path $psexecExePath) -or -Not (Test-Path $psexec64ExePath)) {
+if (-Not (Test-Path $psexecExePath)) {
     try {
         Write-Output "Step 1: Downloading PSExec..."
         Invoke-WebRequest -Uri "https://download.sysinternals.com/files/PSTools.zip" -OutFile $psexecZipPath
 
-        Write-Output "Step 2: Extracting PSExec.exe and PSExec64.exe..."
-        $zipArchive = [System.IO.Compression.ZipFile]::OpenRead($psexecZipPath)
-        foreach ($entry in $zipArchive.Entries) {
-            if ($entry.FullName -eq "PsExec.exe" -or $entry.FullName -eq "PsExec64.exe") {
-                $destinationPath = Join-Path "C:\Tools\Script" $entry.FullName
-                [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $destinationPath, $true)
-            }
-        }
-        $zipArchive.Dispose()
+        Write-Output "Step 2: Extracting PSExec.exe..."
+        # Use Expand-Archive if ZipFile type is not available
+        Expand-Archive -Path $psexecZipPath -DestinationPath "C:\Tools\Script" -Force
 
+        # Remove all files except psexec.exe
         Write-Output "Step 3: Cleaning up zip file..."
-        Remove-Item $psexecZipPath -Force
+        Get-ChildItem "C:\Tools\Script" -Exclude "PsExec.exe" | Remove-Item -Force
+
+        #Remove-Item $psexecZipPath -Force
     }
     catch {
         Write-Error "Failed to download or extract PSExec: $_"
         Write-Output "Cleaning up by removing the Script folder..."
-        Remove-Item "C:\Tools\Script" -Recurse -Force
+        # Attempt to close any open handles or wait before removal
+        Start-Sleep -Seconds 10
+        try {
+            Get-Process | Where-Object { $_.Path -like "C:\Tools\Script*" } | Stop-Process -Force -ErrorAction SilentlyContinue
+            Remove-Item "C:\Tools\Script" -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        catch {
+            Write-Error "Failed to remove Script folder: $_"
+        }
         exit 1
     }
 }
 
-Write-Output "Step 4: Loading environment variables..."
 # Load environment variables
 $envFile = Join-Path $PSScriptRoot ".env"
 $env:DOWNLOAD_URL = $null
 $env:KEY_SECRET = $null
 
 if (Test-Path $envFile) {
-    Write-Output "Environment file found. Loading variables..."
-    # Load environment variables from .env file
-    Get-Content $envFile | ForEach-Object {
-        if ($_ -match "^\s*([^#;].*?)\s*=\s*(.*?)\s*$") {
-            $name, $value = $matches[1], $matches[2]
-            ${env:$name} = $value
+    $envContent = Get-Content $envFile
+    foreach ($line in $envContent) {
+        $line = $line.Trim()
+        if ($line -and $line -notlike '#*') {
+            $key, $value = $line -split '=', 2
+            $key = $key.Trim()
+            $value = $value.Trim().Trim('"''')
+            
+            switch ($key) {
+                "DOWNLOAD_URL" { $env:DOWNLOAD_URL = $value }
+                "KEY_SECRET" { $env:KEY_SECRET = $value }
+            }
         }
     }
-} else {
-    Write-Output "No environment file found. Skipping variable loading..."
+}
+
+# Validate required environment variables
+if (-not $env:DOWNLOAD_URL -or -not $env:KEY_SECRET) {
+    Write-Error "Missing DOWNLOAD_URL or KEY_SECRET in .env file"
+    exit 1
 }
 
 # Attempt to connect to hostname using PSExec
@@ -81,6 +94,18 @@ catch {
     exit 1
 }
 
+# Check if another installation is in progress
+$mutexName = "Global\\_MSIExecute"
+do {
+    try {
+        $mutex = [System.Threading.Mutex]::OpenExisting($mutexName)
+        Write-Output "Waiting for another installation to finish..."
+        Start-Sleep -Seconds 30
+    } catch {
+        break
+    }
+} while ($true)
+
 # Remote uninstallation and installation
 try {
     # Prepare remote commands
@@ -96,15 +121,31 @@ try {
     foreach ($command in $remoteCommands) {
         if ($command.Trim() -ne "") {
             Write-Output "Executing command: $command"
-            $process = Start-Process -FilePath ".\PsExec.exe" -ArgumentList "\\$Hostname", "cmd", "/c", "`"$command`"" -Wait -PassThru -RedirectStandardOutput "C:\Tools\Script\psexec_output.txt" -RedirectStandardError "C:\Tools\Script\psexec_error.txt"
+            $retryCount = 0
+            $maxRetries = 3
+            $waitSeconds = 20
+            
+            do {
+                $process = Start-Process -FilePath ".\PsExec.exe" -ArgumentList "\\$Hostname", "cmd", "/c", "`"$command`"" -Wait -PassThru -RedirectStandardOutput "C:\Tools\Script\psexec_output.txt" -RedirectStandardError "C:\Tools\Script\psexec_error.txt"
+                
+                if ($process.ExitCode -eq 1618) {
+                    Write-Output "Another installation is in progress. Waiting and will retry..."
+                    Start-Sleep -Seconds $waitSeconds
+                    $retryCount++
+                } else {
+                    break
+                }
+            } while ($retryCount -lt $maxRetries)
+            
             if ($process.ExitCode -ne 0) {
                 $errorContent = Get-Content "C:\Tools\Script\psexec_error.txt"
                 $installLog = Get-Content "C:\Tools\Script\install.log" -ErrorAction SilentlyContinue
-                throw "Remote command failed with exit code $($process.ExitCode). Error details:`n$errorContent`nInstallation log:`n$installLog"
+                Write-Output "Installation log content:"
+                Write-Output $installLog
+                throw "Remote command failed with exit code $($process.ExitCode). Error details:`n$errorContent"
             }
         }
     }
-
     Write-Output "Remote uninstallation and installation completed successfully"
 }
 catch {
@@ -123,8 +164,10 @@ finally {
         # Remove Script folder but keep Tools folder
         Remove-Item "C:\Tools\Script" -Recurse -Force
         Write-Output "Cleaned up local PSExec files and Script folder"
-    }
+    } 
     catch {
-        Write-Error "Failed to clean up local PSExec files and Script folder: $_"
+        Write-Output "Failed to remove Script folder, possibly in use. Waiting..."
+        Start-Sleep -Seconds 30
+        Remove-Item "C:\Tools\Script" -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
