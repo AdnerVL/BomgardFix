@@ -36,7 +36,7 @@ AI-Assisted Development This script was created with significant assistance from
 
 This project is licensed under the GNU General Public License v3.0. See the [LICENSE](LICENSE) file for details.
 
-```
+
 
 ## GPL-3.0 License 📝
 
@@ -44,8 +44,6 @@ This project is licensed under the GNU General Public License v3.0. See the [LIC
 GNU GENERAL PUBLIC LICENSE
 Version 3, 29 June 2007
 
-...
-
-END OF TERMS AND CONDITIONS
 ```
 
+END OF TERMS AND CONDITIONS
