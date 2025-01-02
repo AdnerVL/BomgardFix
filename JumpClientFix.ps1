@@ -1,9 +1,18 @@
 # Define parameters at the script level
-$Hostname = $args[0]
+param(
+    [Parameter(Mandatory=$false)]
+    [string]$hostname
+)
 
-# If no hostname provided via argument, prompt for input
-if (-not $Hostname) {
-    $Hostname = Read-Host "Please enter the hostname"
+# If hostname is not provided, prompt the user
+if ([string]::IsNullOrWhiteSpace($hostname)) {
+    $hostname = Read-Host "Please enter the hostname"
+}
+
+# Validate that hostname is not empty after prompting
+if ([string]::IsNullOrWhiteSpace($hostname)) {
+    Write-Error "Hostname cannot be empty. Script cannot continue."
+    exit
 }
 
 # Ensure C:\Tools\Script directory exists
@@ -94,17 +103,26 @@ catch {
     exit 1
 }
 
-# Check if another installation is in progress
-$mutexName = "Global\\_MSIExecute"
-do {
-    try {
-        $mutex = [System.Threading.Mutex]::OpenExisting($mutexName)
-        Write-Output "Waiting for another installation to finish..."
-        Start-Sleep -Seconds 30
-    } catch {
-        break
+# Check for installation in progress
+#$checkCommand = "powershell.exe -Command `"Get-Process msiexec`""
+$checkCommand = 'cmd /c powershell.exe -Command "Get-Process msiexec"'
+$processList = & $psexecExePath -accepteula -s \\$hostname $checkCommand
+
+if ($processList) {
+    Write-Output "Installation process found on ${hostname}:"
+    Write-Output $processList
+
+    $stop = Read-Host "Do you want to stop the installation process? (y/n)"
+    if ($stop -eq 'y') {
+        $stopCommand = "powershell -Command `"Stop-Process -Name msiexec -Force`""
+        & $psexecExePath -accepteula -s \\$hostname $stopCommand
+        Write-Output "Installation process stopped."
+    } else {
+        Write-Output "Installation process not stopped."
     }
-} while ($true)
+} else {
+    Write-Output "No installation process found on $hostname."
+}
 
 # Remote uninstallation and installation
 try {
@@ -112,8 +130,8 @@ try {
     $remoteCommands = @(
         "powershell -Command `"Start-Process powershell -Verb RunAs -ArgumentList '-Command', 'Get-WmiObject Win32_Product | Where-Object { `$_.Name -like ''BeyondTrust Jump Client*'' } | ForEach-Object { Start-Process ''msiexec.exe'' -ArgumentList ''/x '', `$_.IdentifyingNumber, ''/qn /norestart'' -Wait }'`"",
         "if not exist C:\Tools\Script mkdir C:\Tools\Script",
-        "powershell -Command `"Start-Process powershell -Verb RunAs -ArgumentList '-Command', 'Invoke-WebRequest -Uri ''$env:DOWNLOAD_URL'' -OutFile ''C:\Tools\Script\install.msi'''`"",
-        "msiexec /i C:\Tools\Script\install.msi KEY_INFO=`"$env:KEY_SECRET`" /qn /norestart /l*v C:\Tools\Script\install.log"
+        "powershell -Command `"Start-Process powershell -Verb RunAs -ArgumentList '-Command', 'Invoke-WebRequest -Uri ''$($env:DOWNLOAD_URL)'' -OutFile ''C:\Tools\Script\install.msi'''`"",
+        "msiexec /i C:\Tools\Script\install.msi KEY_INFO=`"$($env:KEY_SECRET)`" /qn /norestart /l*v C:\Tools\Script\install.log"
     )
 
     Set-Location "C:\Tools\Script"  # Ensure we are in the directory where PsExec is located
