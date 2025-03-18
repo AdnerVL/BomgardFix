@@ -104,9 +104,9 @@ catch {
 }
 
 # Check for installation in progress
-#$checkCommand = "powershell.exe -Command `"Get-Process msiexec`""
-$checkCommand = 'cmd /c powershell.exe -Command "Get-Process msiexec"'
-$processList = & $psexecExePath -accepteula -s \\$hostname $checkCommand
+$checkCommand = "powershell.exe -Command `"Get-Process msiexec`""
+$processList = & $psexecExePath -accepteula -s \\$hostname cmd.exe /c $checkCommand 2>&1
+#$processList = & $psexecExePath -accepteula -s \\$hostname $checkCommand
 
 if ($processList) {
     Write-Output "Installation process found on ${hostname}:"
@@ -173,19 +173,20 @@ catch {
 finally {
     # Cleanup: Remove local PSExec files and Script folder
     try {
-        # Remove PSExec executables
-        Remove-Item "C:\Tools\Script\PsExec.exe" -Force
-        Remove-Item "C:\Tools\Script\PsExec64.exe" -ErrorAction SilentlyContinue
-        Remove-Item "C:\Tools\Script\psexec_output.txt" -ErrorAction SilentlyContinue
-        Remove-Item "C:\Tools\Script\psexec_error.txt" -ErrorAction SilentlyContinue
-        
-        # Remove Script folder but keep Tools folder
-        Remove-Item "C:\Tools\Script" -Recurse -Force
-        Write-Output "Cleaned up local PSExec files and Script folder"
-    } 
-    catch {
-        Write-Output "Failed to remove Script folder, possibly in use. Waiting..."
-        Start-Sleep -Seconds 30
-        Remove-Item "C:\Tools\Script" -Recurse -Force -ErrorAction SilentlyContinue
-    }
+# Wait and force close any processes using the folder
+Start-Sleep -Seconds 10
+Get-Process | Where-Object { $_.Path -like "C:\Tools\Script*" } | Stop-Process -Force -ErrorAction SilentlyContinue
+Start-Sleep -Seconds 5
+
+# Remove PSExec files and folder
+Remove-Item "C:\Tools\Script\PsExec.exe" -Force -ErrorAction SilentlyContinue
+Remove-Item "C:\Tools\Script\PsExec64.exe" -Force -ErrorAction SilentlyContinue
+Remove-Item "C:\Tools\Script\psexec_output.txt" -Force -ErrorAction SilentlyContinue
+Remove-Item "C:\Tools\Script\psexec_error.txt" -Force -ErrorAction SilentlyContinue
+Remove-Item "C:\Tools\Script" -Recurse -Force -ErrorAction SilentlyContinue
+Write-Output "Cleaned up local PSExec files and Script folder"
+} 
+catch {
+Write-Output "Failed to clean up, files still in use after retry."
+}
 }
