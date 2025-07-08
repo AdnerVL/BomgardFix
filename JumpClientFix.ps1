@@ -114,8 +114,9 @@ if ($processList) {
 
     $stop = Read-Host "Do you want to stop the installation process? (y/n)"
     if ($stop -eq 'y') {
-        $stopCommand = "powershell -Command `"Stop-Process -Name msiexec -Force`""
-        & $psexecExePath -accepteula -s \\$hostname $stopCommand
+        # Use cmd.exe /c to wrap the PowerShell command for correct remote parsing
+        $stopCommand = 'cmd.exe /c powershell -Command "Stop-Process -Name msiexec -Force"'
+        & $psexecExePath -accepteula -s \$hostname $stopCommand
         Write-Output "Installation process stopped."
     } else {
         Write-Output "Installation process not stopped."
